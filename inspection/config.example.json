@@ -1,0 +1,8 @@
+{
+  "device_host": "192.168.8.1",
+  "backup_host": "192.168.8.2",
+  "backup_dir": "../backups/YYYYMMDD-HHMMSS",
+  "admin_username": "admin",
+  "admin_password": "replace-with-admin-password",
+  "root_password": "replace-with-root-password"
+}

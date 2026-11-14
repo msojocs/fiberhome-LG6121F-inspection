@@ -1,0 +1,6 @@
+/backups/
+inspection/config.json
+inspection/device-info.json
+inspection/backup-location.txt
+__pycache__/
+*.py[cod]

@@ -1,0 +1,109 @@
+'
+CPE_INSPECT> Usage: nanddump [OPTIONS] MTD-device
+Dumps the contents of a nand mtd partition.
+
+-h         --help               Display this help and exit
+           --version            Output version information and exit
+           --bb=METHOD          Choose bad block handling method (see below).
+-a         --forcebinary        Force printing of binary data to tty
+-c         --canonicalprint     Print canonical Hex+ASCII dump
+-f file    --file=file          Dump to file
+-l length  --length=length      Length
+-n         --noecc              Read without error correction
+           --omitoob            Omit OOB data (default)
+-o         --oob                Dump OOB data
+-p         --prettyprint        Print nice (hexdump)
+-q         --quiet              Don't display progress and status messages
+-s addr    --startaddress=addr  Start address
+           --skip-bad-blocks-to-start
+                                Skip bad blocks when seeking to the start address
+
+--bb=METHOD, where METHOD can be `padbad', `dumpbad', or `skipbad':
+    padbad:  dump flash data, substituting 0xFF for any bad blocks
+    dumpbad: dump flash data, including any bad blocks
+    skipbad: dump good data, completely skipping any bad blocks (default)
+Usage: nandwrite [OPTION] MTD_DEVICE [INPUTFILE|-]
+Writes to the specified MTD device.
+
+  -a, --autoplace         Use auto OOB layout
+  -k, --skip-all-ffs      Skip pages that contain only 0xff bytes
+  -m, --markbad           Mark blocks bad if write fails
+  -n, --noecc             Write without ecc
+  -N, --noskipbad         Write without bad block skipping
+  -o, --oob               Input contains oob data
+  -O, --onlyoob           Input contains oob data and only write the oob part
+  -s addr, --start=addr   Set output start address (default is 0)
+  --skip-bad-blocks-to-start                          Skip bad blocks when seeking to the start address
+  -p, --pad               Pad writes to page size
+  -b, --blockalign=1|2|4  Set multiple of eraseblocks to align to
+      --input-skip=length Skip |length| bytes of the input file
+      --input-size=length Only read |length| bytes of the input file
+  -q, --quiet             Don't display progress messages
+  -h, --help              Display this help and exit
+  -V, --version           Output version information and exit
+console=tty0 console=ttyS0,921600n1             root=/dev/ubiblock0_0 rootfstype=squashfs ubi.mtd=42            init=/etc/preinit               loglevel=8              androidboot.selinux=permissive androidboot.hardware=mt6890              initcall_debug=1 ramoops.mem_address=0x42880000 ramoops.mem_size=0xe0000 ramoops.pmsg_size=0x10000 ramoops.console_size=0x40000 mtk_printk_ctrl.disable_uart=0 bootslot=b  androidboot.hardware=mt6890 bootprof.pl_t=1131 bootprof.logo_t=0 bootprof.lk_t=6845
+/dev/root /rom squashfs ro,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,noatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,noatime 0 0
+cgroup /sys/fs/cgroup cgroup rw,nosuid,nodev,noexec,relatime,cpuset,cpu,cpuacct,blkio,memory,devices,freezer,perf_event,pids 0 0
+tmpfs /tmp tmpfs rw,nosuid,nodev,noatime,size=314488k,nr_inodes=78622 0 0
+/dev/ubi0_1 /overlay ubifs rw,noatime,assert=read-only,ubi=0,vol=1 0 0
+overlayfs:/overlay / overlay rw,noatime,lowerdir=/,upperdir=/overlay/upper,workdir=/overlay/work 0 0
+tmpfs /dev tmpfs rw,nosuid,relatime,size=512k,nr_inodes=78622,mode=755 0 0
+devpts /dev/pts devpts rw,nosuid,noexec,relatime,mode=600,ptmxmode=000 0 0
+tmpfs /mnt tmpfs rw,relatime,size=314488k,nr_inodes=78622 0 0
+/dev/block/nvcfg /mnt/vendor/nvcfg yaffs2 rw,nosuid,nodev,noatime,nodiratime 0 0
+/dev/block/nvdata /mnt/vendor/nvdata yaffs2 rw,nosuid,nodev,noatime,nodiratime 0 0
+/dev/block/nvram /mnt/vendor/nvram yaffs2 rw,nosuid,nodev,noatime,nodiratime 0 0
+/dev/block/protect1 /mnt/vendor/protect_f yaffs2 rw,nosuid,nodev,noatime,nodiratime 0 0
+/dev/block/protect2 /mnt/vendor/protect_s yaffs2 rw,nosuid,nodev,noatime,nodiratime 0 0
+/dev/ubi1_1 /customer ubifs rw,relatime,assert=read-only,ubi=1,vol=1 0 0
+/dev/block/mcf1 /mnt/vendor/mdota jffs2 rw,relatime 0 0
+/dev/block/mcf2 /mnt/vendor/mdota2 jffs2 rw,relatime 0 0
+debugfs /sys/kernel/debug debugfs rw,noatime 0 0
+/dev/ubi1_3 /data ubifs rw,relatime,assert=read-only,ubi=1,vol=3 0 0
+/dev/ubi1_2 /fhdata ubifs ro,relatime,assert=read-only,ubi=1,vol=2 0 0
+/dev/pts /dev/pts devpts rw,relatime,mode=600,ptmxmode=000 0 0
+none /config configfs rw,relatime 0 0
+adb /dev/usb-ffs/adb functionfs rw,relatime 0 0
+tracefs /sys/kernel/debug/tracing tracefs rw,noatime 0 0
+Filesystem                Size      Used Available Use% Mounted on
+/dev/root                38.3M     38.3M         0 100% /rom
+tmpfs                   307.1M      9.2M    297.9M   3% /tmp
+/dev/ubi0_1              15.0M     56.0K     14.2M   0% /overlay
+overlayfs:/overlay       15.0M     56.0K     14.2M   0% /
+tmpfs                   512.0K      4.0K    508.0K   1% /dev
+tmpfs                   307.1M         0    307.1M   0% /mnt
+/dev/block/nvcfg         31.9M      2.4M     29.5M   8% /mnt/vendor/nvcfg
+/dev/block/nvdata        31.9M     18.9M     12.9M  59% /mnt/vendor/nvdata
+/dev/block/nvram         31.9M     27.2M      4.7M  85% /mnt/vendor/nvram
+/dev/block/protect1       8.0M      1.7M      6.2M  22% /mnt/vendor/protect_f
+/dev/block/protect2       8.0M      1.7M      6.3M  21% /mnt/vendor/protect_s
+/dev/ubi1_1              90.4M     60.0K     85.7M   0% /customer
+/dev/block/mcf1           8.0M    772.0K      7.2M   9% /mnt/vendor/mdota
+/dev/block/mcf2           8.0M    804.0K      7.2M  10% /mnt/vendor/mdota2
+/dev/ubi1_3             281.7M    888.0K    276.1M   0% /data
+/dev/ubi1_2              15.3M     48.0K     14.4M   0% /fhdata
+crw-rw----    1 root     root       90,   0 Jan  1  2010 [1;35m/dev/mtd0[m
+crw-rw----    1 root     root       90,   1 Jan  1  2010 [1;35m/dev/mtd0ro[m
+[1;36m11201000.usb[m
+[1;36m0000:00:00.0[m  [1;36m0000:01:00.0[m
+/usr/sbin/ubinfo
+/usr/bin/mkfifo
+/usr/bin/tee
+errexit         off
+noglob          off
+ignoreeof       off
+interactive     on
+monitor         on
+noexec          off
+stdin           on
+xtrace          off
+verbose         off
+noclobber       off
+allexport       off
+notify          off
+nounset         off
+vi              off
+pipefail        off
+

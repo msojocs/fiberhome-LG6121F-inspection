@@ -1,0 +1,337 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta name="renderer" content="webkit"/>
+    <meta name="force-rendering" content="webkit"/>
+    <meta http-equiv="X-UA-Compatible" content="ie=edge,chrome=1">
+    <meta http-equiv="x-dns-prefetch-control" content="on" />
+    <meta name="apple-mobile-web-app-title" content="yeziyuan" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta content="telephone=no" name="format-detection" /> 
+    <meta name="full-screen" content="yes" />
+    <meta name="x5-fullscreen" content="true" />
+    <title>5G CPE</title>
+	<link href="" rel="icon">
+    <link rel="stylesheet" type="text/css" href="static/css/element.css">
+    <link rel="stylesheet" type="text/css" href="static/css/styles.css">
+</head>
+<body id="login_body">
+    <div id="login_app" :class="{'login_show': isComplete}">
+        <div v-if="isLeishen" class="login_logo_leishen"></div>
+        <div v-else class="login_logo" id="login_logo_fh"></div>
+        <div class="login_logo_omantel" id="login_logo_omantel" style="display: none;"></div>
+        <div class="login_logo_plus" id="login_logo_plus" style="display: none;"><a href="http://www.plus.pl" target="_blank"><img src="static/image/plus/plus_logo.png"></a></div>
+        <div class="login_lang_pl" v-if="isPLUS && (modelName != 'LG6121D') && (modelName != 'LG6121H')">
+            <el-select v-model = "lang_pl" @change="changeLangPlus" size="mini" prop="lang_pl" style="border: 0px;">
+                <el-option value="pl" label="Polski"></el-option>
+                <el-option value="en" label="English"></el-option>
+            </el-select>
+        </div>
+        <div class="login_lang" @click="changeLang" v-html="lang_txt" v-if="!isPLUS"></div>
+        <div class="login_div" >
+            <div class="login_box" >
+                <el-form ref="elForm" :model="formData" :rules="rules" size="large" label-position="top">
+                    <center class="login_title">{{$t('welcome')}}<br/>{{$t('5G_CPE')}}</center>
+                    <el-form-item class="login_item" prop="LoginName">
+                        <el-input v-model="formData.LoginName" prefix-icon='el-icon-user' :placeholder="$t('enterName')" clearable></el-input>
+                    </el-form-item>
+                    <el-form-item class="login_item" prop="LoginPwd">
+                        <el-input v-model="formData.LoginPwd" prefix-icon='el-icon-lock' :placeholder="$t('enterPwd')" clearable show-password></el-input>
+                    </el-form-item>
+                    <p class="tips" :style="{color: err_tips_color}"  v-html="tips"></p>
+                    <el-form-item class="login_item" style="margin: 0" size="large">
+                        <el-button type="primary" @click="onApply">{{$t('login')}}</el-button>
+                    </el-form-item>
+                </el-form>
+            </div>
+        </div>
+        <!--div class="login_copyright" v-if="!isLeishen">{{$t('copy_right')}}</div-->
+        <!-- <div class="login_copyright">{{$t('copy_right')}} &nbsp&nbsp&nbsp&nbsp&nbsp <a>{{$t('copy_right1')}}</a></div> -->
+        <div class="login_copyright" v-if="isPLUS">{{$t('copy_right_plplus')}} {{year}}</div>
+    </div>
+</body>
+<script type="text/javascript" src="/plugins/checkBrowser.js"></script>
+<script type="text/javascript" src="js/util.js"></script>
+<script type="text/javascript" src="lang/login_res.js"></script>
+<script type="text/javascript" src="/plugins/vue.min.js"></script>
+<script type="text/javascript" src="/plugins/element.js"></script>
+<script type="text/javascript" src="/plugins/vue-i18n.min.js"></script>
+<script type="text/javascript" src="/plugins/polyfill.min.js"></script>
+<script type="text/javascript">
+function loadJsCss(filename, filetype){
+    if (filetype=="js"){
+         var fileref=document.createElement('script')    //创建标签
+         fileref.setAttribute("type","text/javascript")  //定义属性type的值为text/javascript
+         fileref.setAttribute("src", filename)           //文件的地址
+    }else if (filetype=="css"){ 
+         var fileref=document.createElement("link")
+         fileref.setAttribute("rel", "stylesheet")
+         fileref.setAttribute("type", "text/css") 
+         fileref.setAttribute("href", filename)
+    }
+    if (typeof fileref!="undefined"){
+      document.getElementsByTagName("head")[0].appendChild(fileref)
+    }
+}
+
+initPageConfigure().then(function(){
+    $post('get_device_info', null, "nocheck").then(function(getdata){
+        if (getdata.operator_name == "PLDT" || getdata.operator_name == "PH_PLDT"){
+            loadJsCss("static/css/element_pldt.css", "css");
+            loadJsCss("static/css/styles_pldt.css", "css");
+        }else if(getdata.operator_name == "OMN_OMANTEL"){
+            loadJsCss("static/css/styles_omantel.css", "css");
+            document.getElementById("login_logo_omantel").style.display = "block";
+        } 
+        var lang = getdata.i18n;
+        var messages = {};
+        if(getdata.model_name == "LG6121H" && getdata.operator_name == "PL_PLUS"){
+            messages[lang] = en_lang_json; 
+        }else{
+            if (lang == "pl"){
+                messages[lang] = pl_lang_json;
+            }else if(lang == "zh"){
+                messages[lang] = zh_lang_json;
+            }else if(lang == "th"){
+                messages[lang] = th_lang_json;
+            }else{
+                messages[lang] = en_lang_json;
+            }
+        }
+        
+        var i18n = new VueI18n({
+          locale: lang,
+          messages: messages
+        })
+        if (getdata.operator_name == "PL_PLUS") {
+           document.title = '5G CPE FiberHome'
+        }
+        var vm = new Vue({
+            el: '#login_app',
+            i18n: i18n,
+            data: function(){
+                var that = this
+                return {
+                    app_code: "/static/image/app_code.png",
+                    dialogTable: false,
+                    QRcode_disable: false,
+                    isComplete: false,
+                    tips: this.$t("user_pwd_tipd"),
+                    err_tips_color: "#727580",
+                    lang_txt: "中",
+                    lang_pl: "pl",
+                    formData: {
+                        LoginName: "",
+                        LoginPwd: ""
+                    },
+                    rules: {
+                        LoginName: [
+                            { required: true, message:this.$t("nameEmpty")}
+                        ],
+                        LoginPwd: [
+                            { required: true, message:this.$t("pwdEmpty")}
+                        ]
+                    },
+                    isLeishen: false,
+                    isPLUS: false,
+                    modelName: "",
+                    year: new Date().getFullYear() || 2023,
+                    timeout: null
+                }
+            },
+            created: function(){
+                g_this = this;
+                this.isComplete = true;
+                document.onkeydown = function(e) {
+                    var key = window.event.keyCode;
+                    if (key == 13) {  //阻止enter
+                        g_this.onApply();
+                    }
+                }
+                if (getdata.operator_name == "PL_PLUS"){
+                    this.lang_pl = lang;
+                } else{
+                    // if (getdata.operator_name == "TH_AIS"){
+                    //     this.lang_txt = lang.toUpperCase() == "TH" ? "EN" : "ภาษาไทย";
+                    // } else{
+                        this.lang_txt = lang.toUpperCase() == "EN" ? "中" : "EN";
+                    // }
+                    
+                }
+                if (getdata.operator_name == "LEISHEN")
+                {
+                    this.isLeishen = true;
+                } 
+                if (getdata.operator_name == "PL_PLUS") 
+                {
+                    this.isPLUS = true;
+                    var link = document.getElementsByTagName("link")[0];
+                    if(link.rel == 'icon') {
+                        link.href = "static/image/plus/plus.ico";
+                    }
+                    document.getElementById("login_logo_fh").style.display = "none";
+                    g_this.getPlmn();
+                    clearInterval(this.interval);
+                    this.interval = setInterval(function() {
+                        g_this.getPlmn();
+                    }, 3000);
+                    
+                }
+                if (getdata.model_name){
+                    this.modelName = getdata.model_name;
+                }  
+            },
+            watch: {
+                "formData.LoginName":{
+                    handler: function(newName, oldName) {   
+                        var that = this;
+                        this.$refs.elForm.validateField("LoginName",function(valid){
+                            if (valid) {
+                                that.tips = "";
+                            } 
+                        })
+                    
+                    },
+                    immediate: false,
+                    deep: true
+                },
+                "formData.LoginPwd":{
+                    handler: function(newName, oldName) {
+                        var that = this;
+                        this.$refs.elForm.validateField("LoginPwd",function(valid){
+                            if (valid) {
+                                that.tips = "";
+                            } 
+                        })
+                    },
+                    immediate: false,
+                    deep: true
+                }
+            },
+            beforeDestroy:function () {
+                clearTimeout(this.timeout)
+            },
+            methods: {
+                onApply: function(){
+                    var that = this;
+                    this.$refs['elForm'].validate(function(valid){
+                        if (!valid) {
+                            console.log('error submit!!');
+                            return false;
+                        }
+                        if(getdata.operator_name != "OMN_OMANTEL" && getdata.operator_name != "PLDT" && getdata.operator_name != "DITO"){
+                            is_other_logged_in().then(function(getdata){
+                                if (getdata && getdata.data == 1) {
+                                    fh_confirm(that.$t("other_logged")).then(function(){
+                                        that.onSumit();
+                                    }).catch(function(res){})
+                                }else {
+                                    that.onSumit();
+                                }
+                            })
+                        }
+                        else{
+                            that.onSumit();
+                        }
+                    });
+                },
+                onSumit: function(){
+                    var that = this;
+                    var login_data = {
+                        username: this.formData.LoginName,
+                        password: this.formData.LoginPwd
+                    };
+                    $post('DO_WEB_LOGIN', login_data).then(function(data){
+                        //console.log(data);
+                        if (data && data != "")
+                        {
+                            var login_result = data.split("|")[0];
+                            if ( login_result == 0 )//校验成功
+                            {
+                                $get("set_developer_mode", null).then(function(response){
+                                    window.location.href="main.html";
+                                    return;
+                                })
+                            }
+                            else if ( login_result == 1 )
+                            {
+                                that.tips = that.$t("loginErr1");
+                                that.err_tips_color = "#FF1A1A";
+                                return;
+                            }
+                            else if ( login_result == 2 )
+                            {
+                                that.tips = that.$t("loginErr2");
+                                that.err_tips_color = "#FF1A1A";
+                                return;
+                            }
+                            else if ( login_result == 3 )
+                            {
+                                that.tips = that.$t("loginErr3");
+                                that.err_tips_color = "#FF1A1A";
+                                return;
+                            }
+                            else if ( login_result == 4 )
+                            {
+                                that.tips = that.$t("loginErr4");
+                                that.err_tips_color = "#FF1A1A";
+                                return;
+                            }
+                            else
+                            {
+                                that.tips = that.$t("loginErr5");
+                                that.err_tips_color = "#FF1A1A";
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            that.tips = this.$t("loginErr5");
+                            that.err_tips_color = "#FF1A1A";
+                            return;
+                        }
+                    })
+                },
+                changeLang: function(){
+                    var that = this;
+                    var setLang = "";
+                    // if (getdata.operator_name == "TH_AIS"){
+                    //     setLang = this.lang_txt == "ภาษาไทย" ? "th" : "en"
+                    // }else{
+                        setLang = this.lang_txt == "EN" ? "en" : "zh"
+                    // }
+                    var data = {
+                        lang: setLang
+                    };
+                    $post('web_set_language', data, "nocheck").then(function(response){
+                        location.reload();
+                    })
+                },
+                changeLangPlus: function(){
+                    var data = {
+                        lang: this.lang_pl
+                    };
+                    $post('web_set_language', data, "nocheck").then(function(response){
+                        location.reload();
+                    })
+                },
+                getPlmn: function(){
+                    $post("get_plmn_info", null, "nocheck").then(function(response){
+                        if ((response.PLMN == "26001" || response.PLMN == "26012")) {
+                            document.getElementById("login_logo_fh").style.display = "none";
+                            document.getElementById("login_logo_plus").style.display = "block";
+                        }else {
+                            document.getElementById("login_logo_fh").style.display = "block";
+                            document.getElementById("login_logo_plus").style.display = "none";
+                        }
+                        
+                    })
+                }
+            }
+        })
+    })
+})
+</script>
+</html>
